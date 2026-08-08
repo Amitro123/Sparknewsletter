@@ -2,8 +2,8 @@ name: Send Daily Update to Telegram
 
 on:
   schedule:
-    # Runs daily at 13:20 Israel Summer Time (10:20 UTC)
-    - cron: '20 10 * * *'
+    # Runs daily at 13:40 Israel Summer Time (10:40 UTC)
+    - cron: '40 10 * * *'
   workflow_dispatch:
 
 permissions:
