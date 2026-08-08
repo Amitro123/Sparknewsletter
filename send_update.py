@@ -21,6 +21,7 @@ DOC_ID = os.getenv("DOC_ID")
 
 ISRAEL_TIMEZONE = ZoneInfo("Asia/Jerusalem")
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+REQUEST_TIMEOUT = (10, 30)  # 10s connect timeout, 30s read timeout
 
 DAILY_HEADING_RE = re.compile(
     r"(?m)^#?\s*עדכון יומי[\s:-]+(?P<date>\d{4}-\d{2}-\d{2})"
@@ -126,7 +127,7 @@ def fetch_google_doc_html(doc_id: str) -> str:
     """Fetch a publicly accessible Google Doc as formatted HTML and convert to Telegram HTML."""
     url = f"https://docs.google.com/document/d/{doc_id}/export?format=html"
 
-    response = requests.get(url, timeout=30)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
 
     html_content = response.content.decode("utf-8", errors="replace")
@@ -227,7 +228,7 @@ def send_to_telegram(text: str) -> list[dict]:
             "disable_web_page_preview": False,
         }
 
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
 
         result = response.json()
