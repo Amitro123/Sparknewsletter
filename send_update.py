@@ -2,8 +2,10 @@ import os
 import re
 from datetime import datetime
 from typing import Iterator
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+from bs4 import BeautifulSoup, NavigableString, Tag
 import requests
 
 try:
@@ -43,18 +45,102 @@ def require_config() -> None:
         )
 
 
-def fetch_google_doc_text(doc_id: str) -> str:
-    """Fetch a publicly accessible Google Doc as plain UTF-8 text."""
-    url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+def clean_google_url(url: str) -> str:
+    """Extract actual destination URL from Google's redirect wrapper if present."""
+    parsed = urlparse(url)
+    if "google.com" in parsed.netloc and parsed.path.endswith("/url"):
+        query = parse_qs(parsed.query)
+        if "q" in query:
+            return query["q"][0]
+    return url
+
+
+def convert_gdoc_node_to_telegram_html(node) -> str:
+    """Recursively convert Google Doc HTML DOM nodes into Telegram-compatible HTML."""
+    if isinstance(node, NavigableString):
+        text = str(node)
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    if not isinstance(node, Tag):
+        return ""
+
+    name = node.name.lower()
+
+    if name in ["head", "script", "style"]:
+        return ""
+
+    style = node.get("style", "").lower().replace(" ", "")
+    is_bold = (
+        "font-weight:700" in style
+        or "font-weight:bold" in style
+        or name in ["b", "strong"]
+    )
+    is_italic = (
+        "font-style:italic" in style
+        or name in ["i", "em"]
+    )
+
+    children_content = "".join(
+        convert_gdoc_node_to_telegram_html(child) for child in node.children
+    )
+    res = children_content
+
+    if is_bold and res.strip():
+        res = f"<b>{res}</b>"
+    if is_italic and res.strip():
+        res = f"<i>{res}</i>"
+
+    if name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+        res = f"\n\n<b>{res}</b>\n"
+    elif name == "p":
+        res = f"\n{res}"
+    elif name == "a":
+        href = clean_google_url(node.get("href", ""))
+        if href and res.strip():
+            href_escaped = href.replace("&", "&amp;").replace('"', "&quot;")
+            res = f'<a href="{href_escaped}">{children_content}</a>'
+    elif name == "li":
+        res = f"\n• {res}"
+    elif name in ["ul", "ol"]:
+        res = f"{res}\n"
+
+    return res
+
+
+def convert_markdown_links_to_html(text: str) -> str:
+    """Convert leftover markdown links [text](url) to HTML <a href='url'>text</a>."""
+    def _repl(match):
+        label = match.group(1)
+        url = match.group(2)
+        url_escaped = url.replace("&", "&amp;").replace('"', "&quot;")
+        return f'<a href="{url_escaped}">{label}</a>'
+
+    return re.sub(r'\[([^\]]+)\]\((https?://[^\s\)]+)\)', _repl, text)
+
+
+def fetch_google_doc_html(doc_id: str) -> str:
+    """Fetch a publicly accessible Google Doc as formatted HTML and convert to Telegram HTML."""
+    url = f"https://docs.google.com/document/d/{doc_id}/export?format=html"
 
     response = requests.get(url, timeout=30)
     response.raise_for_status()
 
-    text = response.content.decode("utf-8").strip()
-    if not text:
+    html_content = response.content.decode("utf-8", errors="replace")
+    if not html_content.strip():
         raise ValueError("Google Doc is empty.")
 
-    return text
+    soup = BeautifulSoup(html_content, "html.parser")
+    body = soup.find("body") or soup
+
+    telegram_html = convert_gdoc_node_to_telegram_html(body)
+    telegram_html = convert_markdown_links_to_html(telegram_html)
+
+    telegram_html = re.sub(r"\n{3,}", "\n\n", telegram_html).strip()
+    return telegram_html
 
 
 def extract_latest_daily_update(text: str) -> tuple[str, str]:
@@ -62,7 +148,8 @@ def extract_latest_daily_update(text: str) -> tuple[str, str]:
     Extract the final section that starts with:
     # עדכון יומי: YYYY-MM-DD
     """
-    matches = list(DAILY_HEADING_RE.finditer(text))
+    plain_text = re.sub(r"<[^>]+>", "", text)
+    matches = list(DAILY_HEADING_RE.finditer(plain_text))
 
     if not matches:
         raise ValueError(
@@ -73,7 +160,13 @@ def extract_latest_daily_update(text: str) -> tuple[str, str]:
 
     latest_match = matches[-1]
     update_date = latest_match.group("date")
-    update_text = text[latest_match.start():].strip()
+
+    html_matches = list(DAILY_HEADING_RE.finditer(text))
+    if html_matches:
+        latest_html_match = html_matches[-1]
+        update_text = text[latest_html_match.start():].strip()
+    else:
+        update_text = text[latest_match.start():].strip()
 
     if not update_text:
         raise ValueError("Latest daily update is empty.")
@@ -82,12 +175,7 @@ def extract_latest_daily_update(text: str) -> tuple[str, str]:
 
 
 def validate_update_is_today(update_date: str) -> None:
-    """
-    Refuse to publish stale content.
-
-    Gemini is expected to update the Google Doc first and only then dispatch
-    this workflow, so the latest section must be dated today in Israel.
-    """
+    """Refuse to publish stale content."""
     today = datetime.now(ISRAEL_TIMEZONE).date().isoformat()
 
     if update_date != today:
@@ -122,7 +210,7 @@ def split_telegram_message(
 
 
 def send_to_telegram(text: str) -> list[dict]:
-    """Publish text to the configured Telegram chat."""
+    """Publish text to the configured Telegram chat with HTML formatting."""
     if not BOT_TOKEN or not CHAT_ID:
         raise ValueError(
             "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be configured."
@@ -135,6 +223,8 @@ def send_to_telegram(text: str) -> list[dict]:
         payload = {
             "chat_id": CHAT_ID,
             "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
         }
 
         response = requests.post(url, json=payload, timeout=30)
@@ -154,7 +244,7 @@ def main() -> None:
     require_config()
 
     print("Fetching latest content from Google Docs...")
-    document_text = fetch_google_doc_text(DOC_ID)
+    document_text = fetch_google_doc_html(DOC_ID)
 
     update_date, latest_update = extract_latest_daily_update(document_text)
     validate_update_is_today(update_date)

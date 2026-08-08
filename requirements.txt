@@ -1,3 +1,4 @@
 requests>=2.32,<3
 python-dotenv>=1.0.0
 tzdata
+beautifulsoup4>=4.12.0
