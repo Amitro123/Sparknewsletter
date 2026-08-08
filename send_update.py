@@ -21,7 +21,7 @@ ISRAEL_TIMEZONE = ZoneInfo("Asia/Jerusalem")
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 
 DAILY_HEADING_RE = re.compile(
-    r"(?m)^# עדכון יומי: (?P<date>\d{4}-\d{2}-\d{2})[ \t]*$"
+    r"(?m)^#?\s*עדכון יומי[\s:-]+(?P<date>\d{4}-\d{2}-\d{2})"
 )
 
 
@@ -67,7 +67,8 @@ def extract_latest_daily_update(text: str) -> tuple[str, str]:
     if not matches:
         raise ValueError(
             "No daily update heading found. Expected: "
-            "'# עדכון יומי: YYYY-MM-DD'"
+            "'# עדכון יומי: YYYY-MM-DD'\n"
+            f"Fetched text snippet: {text[:200]!r}"
         )
 
     latest_match = matches[-1]
